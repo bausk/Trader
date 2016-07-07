@@ -15,14 +15,20 @@
 
 #define EXPERT_MAGIC 123456
 //--- input parameters
+input int      StopLoss=300;
+input int      RunningStopLoss=90;
+input int      TakeProfit=300;
 input double   LotSafety=40;
 input int      BuyCutoff=35;
 input int      SellCutoff=75;
 input int      OscDiff=30;
-input int      StopLoss=100;
-input int      TakeProfit=400;
+input int      CheckSeconds = 3600;
 
 int hMA, hOscSlow, hOscFast, hAwesome;
+datetime last_checked;
+double position_price;
+double latest_checked_price;
+double last_processed_time;
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
 //+------------------------------------------------------------------+
@@ -72,6 +78,7 @@ void OnTick()
     request.type_filling = ORDER_FILLING_FOK;
     
     TimeCurrent(dt);
+    datetime time_current = StructToTime(dt);
     
     // 1. Check if order is placed.
     // 2. if yes, 2.1 check if time to close,
@@ -106,7 +113,41 @@ void OnTick()
         // processing orders with "our" symbols only
         if(Symbol()==PositionGetSymbol(0))
             {
-            //2.
+            //2
+            if (time_current - last_checked > CheckSeconds)
+                {
+                last_checked = time_current;
+                request.action=TRADE_ACTION_SLTP;
+                if(PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_SELL)
+                    {
+                    double current_price = SymbolInfoDouble(Symbol(),SYMBOL_BID);
+                    if (current_price < position_price && current_price < latest_checked_price)
+                        {
+                        latest_checked_price = current_price;
+                        //Short position is loss-free, adjust stoploss
+                        request.tp = NormalizeDouble(current_price - TakeProfit * _Point, _Digits);
+                        request.sl = NormalizeDouble(current_price + RunningStopLoss * _Point, _Digits);
+                        request.magic = EXPERT_MAGIC;
+                        OrderSend(request, result);
+                        }
+                    
+                    }
+                if(PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY)
+                    {
+                    double current_price = SymbolInfoDouble(Symbol(),SYMBOL_ASK);
+                    if (current_price > position_price && current_price > latest_checked_price)
+                        {
+                        latest_checked_price = current_price;
+                        //Short position is loss-free, adjust stoploss
+                        request.tp = NormalizeDouble(current_price + TakeProfit * _Point, _Digits);
+                        request.sl = NormalizeDouble(current_price - RunningStopLoss * _Point, _Digits);
+                        request.magic = EXPERT_MAGIC;
+                        OrderSend(request, result);
+                        }
+                    
+                    }
+                }
+            
             return;
             
             }       
@@ -114,6 +155,12 @@ void OnTick()
     else if(pos_total == 0)
         {
         //3.
+        
+        if(CopyTime(Symbol(),0,0,2,t)<2 || CopyHigh(Symbol(),0,0,2,h)<2 || CopyLow(Symbol(),0,0,2,l)<2)
+            {
+               Print("Can't copy timeserieh!");
+               return;
+            }        
         double diff = OscSlow[1] - OscFast[1];
         
         //Check short indication
@@ -125,6 +172,8 @@ void OnTick()
             request.tp = NormalizeDouble(last_tick.bid - TakeProfit * _Point, _Digits);
             request.sl = NormalizeDouble(last_tick.ask + StopLoss * _Point, _Digits);
             request.magic = EXPERT_MAGIC;
+            position_price = request.price;
+            latest_checked_price = request.price;
             }
         //Check long indication
         else if (OscSlow[1] < BuyCutoff && OscSlow[2] < BuyCutoff && diff < -(OscDiff))
@@ -135,6 +184,8 @@ void OnTick()
             request.tp = NormalizeDouble(last_tick.ask + TakeProfit * _Point, _Digits);
             request.sl = NormalizeDouble(last_tick.bid - StopLoss * _Point, _Digits);
             request.magic = EXPERT_MAGIC;
+            position_price = request.price;
+            latest_checked_price = request.price;
             }
         else
             {
