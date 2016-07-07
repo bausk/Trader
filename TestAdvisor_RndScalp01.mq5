@@ -12,26 +12,25 @@
 #property description "of the price range. After order execution, the TakeProfit value"
 #property description "is set at the 'indicator_TP' level. The StopLoss level is moved"
 #property description "to the SMA values only for the profitable orders."
+
+#define EXPERT_MAGIC 123456
 //--- input parameters
-input double   LotSafety=20;
-input int      StartHour=0;
-input int      EndHour=24;
-input int      MAper=240;
-input int      BuyCutoff=75;
-input int      SellCutoff=35;
+input double   LotSafety=40;
+input int      BuyCutoff=35;
+input int      SellCutoff=75;
 input int      OscDiff=30;
+input int      StopLoss=100;
+input int      TakeProfit=400;
 
-
-int hMA, hCI;
+int hMA, hOscSlow, hOscFast, hAwesome;
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
 //+------------------------------------------------------------------+
 int OnInit()
   {
 //---
-   hMA = iMA(NULL, 0, MAper, 0, MODE_SMA, PRICE_CLOSE);
-   hOscSlow = iStochastic(NULL, 0, 21, 4, 10, MODE_SMA, PRICE_CLOSE);
-   hOscFast = iStochastic(NULL, 0, 5, 2, 2, MODE_SMA, PRICE_CLOSE);
+   hOscSlow = iStochastic(NULL, 0, 21, 4, 10, MODE_SMA, STO_LOWHIGH);
+   hOscFast = iStochastic(NULL, 0, 5, 2, 2, MODE_SMA, STO_LOWHIGH);
    hAwesome = iAO(NULL, 0);
 //---
    return(INIT_SUCCEEDED);
@@ -53,15 +52,13 @@ void OnDeinit(const int reason)
 void OnTick()
   {
 //---
-    MqlTradeRequest request;
+    MqlTradeRequest request = {0};
     MqlTradeResult result;
     MqlDateTime dt;
     bool bord = false, sord = false;
-    int i;
-    ulong ticket;
     datetime t[];
     double h[], l[], OscSlow[], OscFast[], Awesome[],
-        lev_h, lev_l, StopLoss, account_balance, lot_size,
+        account_balance, lot_size,
         StopLevel = _Point * SymbolInfoInteger(Symbol(), SYMBOL_TRADE_STOPS_LEVEL),
         Spread = NormalizeDouble( SymbolInfoDouble(Symbol(), SYMBOL_ASK) - SymbolInfoDouble(Symbol(), SYMBOL_BID), _Digits);
     
@@ -71,7 +68,7 @@ void OnTick()
     request.symbol = Symbol();
     request.volume = lot_size;
     request.tp = 0;
-    request.deviation = 0;
+    request.deviation = 5;
     request.type_filling = ORDER_FILLING_FOK;
     
     TimeCurrent(dt);
@@ -91,6 +88,17 @@ void OnTick()
     ArraySetAsSeries(OscFast, true);
     ArraySetAsSeries(Awesome, true);
 
+
+    MqlTick last_tick;
+    if(SymbolInfoTick(Symbol(),last_tick)) 
+        { 
+        } 
+    else
+        {
+        Print("SymbolInfoTick() failed, error = ",GetLastError());
+        return;
+        }
+
     //1.
     int pos_total = PositionsTotal();
     if(pos_total == 1)
@@ -99,31 +107,52 @@ void OnTick()
         if(Symbol()==PositionGetSymbol(0))
             {
             //2.
-            MqlTick last_tick;
-            if(SymbolInfoTick(Symbol(),last_tick)) 
-                { 
-                Print(last_tick.time,": Bid = ",last_tick.bid, 
-                    " Ask = ",last_tick.ask,"  Volume = ",last_tick.volume); 
-                } 
-            else Print("SymbolInfoTick() failed, error = ",GetLastError()); 
+            return;
             
             }       
         }
     else if(pos_total == 0)
         {
         //3.
-        double latest_slow = OscSlow[1];
-        double latest_fast = OscFast[1];
-        if
+        double diff = OscSlow[1] - OscFast[1];
+        
+        //Check short indication
+        if (OscSlow[1] > SellCutoff && OscSlow[2] > SellCutoff && diff > OscDiff)
+            {
+            request.action = TRADE_ACTION_DEAL;
+            request.price = SymbolInfoDouble(Symbol(),SYMBOL_BID);
+            request.type = ORDER_TYPE_SELL;
+            request.tp = NormalizeDouble(last_tick.bid - TakeProfit * _Point, _Digits);
+            request.sl = NormalizeDouble(last_tick.ask + StopLoss * _Point, _Digits);
+            request.magic = EXPERT_MAGIC;
+            }
+        //Check long indication
+        else if (OscSlow[1] < BuyCutoff && OscSlow[2] < BuyCutoff && diff < -(OscDiff))
+            {
+            request.action = TRADE_ACTION_DEAL;
+            request.price = SymbolInfoDouble(Symbol(),SYMBOL_ASK);
+            request.type = ORDER_TYPE_BUY;
+            request.tp = NormalizeDouble(last_tick.ask + TakeProfit * _Point, _Digits);
+            request.sl = NormalizeDouble(last_tick.bid - StopLoss * _Point, _Digits);
+            request.magic = EXPERT_MAGIC;
+            }
+        else
+            {
+            return;
+            }
+            
+        //Perform order
+        
+        OrderSend(request,result);
+        
         }
     else
         {
         Print("Error: too many positions!");
         return;
         }    
-    
-    ArraySetAsSeries(ma, true);
-    atr_l[0] += Spread;
+
+/*
     
 // in this loop we're checking all opened positions
    for(i=0;i<PositionsTotal();i++)
@@ -181,127 +210,10 @@ void OnTick()
          return;
         }
      }
-    
-    
-// in this loop we're checking all pending orders
-   for(i=0;i<OrdersTotal();i++)
-     {
-      // choosing each order and getting its ticket
-      ticket=OrderGetTicket(i);
-      // processing orders with "our" symbols only
-      if(OrderGetString(ORDER_SYMBOL)==Symbol())
-        {
-         // processing Buy Stop orders
-         if(OrderGetInteger(ORDER_TYPE)==ORDER_TYPE_BUY_STOP)
-           {
-            // check if there is trading time and price movement is possible
-            if(dt.hour>=StartHour && dt.hour<EndHour && lev_h<atr_h[0])
-              {
-               // if the opening price is lower than needed
-               if((NormalizeDouble(lev_h-OrderGetDouble(ORDER_PRICE_OPEN),_Digits)>0
-                  // if StopLoss is not defined or higher than needed
-                  || OrderGetDouble(ORDER_SL)==0 || NormalizeDouble(OrderGetDouble(ORDER_SL)-lev_l,_Digits)!=0)
-                  // is opening price close to the current price?
-                  && NormalizeDouble(lev_h-SymbolInfoDouble(Symbol(),SYMBOL_ASK)-StopLevel,_Digits)>0)
-                 {
-                  // pending order parameters will be changed
-                  request.action=TRADE_ACTION_MODIFY;
-                  // putting the ticket number to the structure
-                  request.order=ticket;
-                  // putting the new value of opening price to the structure
-                  request.price=NormalizeDouble(lev_h,_Digits);
-                  // putting new value of StopLoss to the structure
-                  request.sl=NormalizeDouble(lev_l,_Digits);
-                  // sending request to trade server
-                  OrderSend(request,result);
-                  // exiting from the OnTick() function
-                  return;
-                 }
-              }
-            // if there is no trading time or the average trade range has been passed
-            else
-              {
-               // we will delete this pending order
-               request.action=TRADE_ACTION_REMOVE;
-               // putting the ticket number to the structure
-               request.order=ticket;
-               // sending request to trade server
-               OrderSend(request,result);
-               // exiting from the OnTick() function
-               return;
-              }
-            // setting the flag, that indicates the presence of Buy Stop order
-            bord=true;
-           }
-         // processing Sell Stop orders
-         if(OrderGetInteger(ORDER_TYPE)==ORDER_TYPE_SELL_STOP)
-           {
-            // check if there is trading time and price movement is possible
-            if(dt.hour>=StartHour && dt.hour<EndHour && lev_l>atr_l[0])
-              {
-               // if the opening price is higher than needed
-               if((NormalizeDouble(OrderGetDouble(ORDER_PRICE_OPEN)-lev_l,_Digits)>0
-                  // if StopLoss is not defined or lower than need
-                  || OrderGetDouble(ORDER_SL)==0 || NormalizeDouble(lev_h-OrderGetDouble(ORDER_SL),_Digits)>0)
-                  // is opening price close to the current price?
-                  && NormalizeDouble(SymbolInfoDouble(Symbol(),SYMBOL_BID)-lev_l-StopLevel,_Digits)>0)
-                 {
-                  // pending order parameters will be changed
-                  request.action=TRADE_ACTION_MODIFY;
-                  // putting ticket of modified order to the structure
-                  request.order=ticket;
-                  // putting new value of the opening price to the structure
-                  request.price=NormalizeDouble(lev_l,_Digits);
-                  // putting new value of StopLoss to the structure
-                  request.sl=NormalizeDouble(lev_h,_Digits);
-                  // sending request to trade server
-                  OrderSend(request,result);
-                  // exiting from the OnTick() function
-                  return;
-                 }
-              }
-            // if there is no trading time or the average trade range has been passedå
-            else
-              {
-               // we will delete this pending order
-               request.action=TRADE_ACTION_REMOVE;
-               // putting the ticket number to the structure
-               request.order=ticket;
-               // sending request to trade server
-               OrderSend(request,result);
-               // exiting from the OnTick() function
-               return;
-              }
-            // setting the flag, that indicates the presence of Sell Stop order
-            sord=true;
-           }
-        }
-     }
-     
-    request.action=TRADE_ACTION_PENDING;     
-
-
-      if(dt.hour>=StartHour && dt.hour<EndHour)
-        {
-         if(bord==false && lev_h<atr_h[0])
-           {
-            request.price=NormalizeDouble(lev_h,_Digits);
-            request.sl=NormalizeDouble(lev_l,_Digits);
-            request.type=ORDER_TYPE_BUY_STOP;
-            OrderSend(request,result);
-           }
-         if(sord==false && lev_l>atr_l[0])
-           {
-            request.price=NormalizeDouble(lev_l,_Digits);
-            request.sl=NormalizeDouble(lev_h,_Digits);
-            request.type=ORDER_TYPE_SELL_STOP;
-            OrderSend(request,result);
-           }
-        }
+*/
+   return;
    
-    return;
-   
-  }
+   }
 //+------------------------------------------------------------------+
 //| Trade function                                                   |
 //+------------------------------------------------------------------+
