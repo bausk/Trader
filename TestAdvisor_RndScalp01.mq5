@@ -13,10 +13,14 @@
 #property description "is set at the 'indicator_TP' level. The StopLoss level is moved"
 #property description "to the SMA values only for the profitable orders."
 //--- input parameters
-input double   Lots=0.09;
+input double   LotSafety=20;
 input int      StartHour=0;
 input int      EndHour=24;
 input int      MAper=240;
+input int      BuyCutoff=75;
+input int      SellCutoff=35;
+input int      OscDiff=30;
+
 
 int hMA, hCI;
 //+------------------------------------------------------------------+
@@ -26,8 +30,9 @@ int OnInit()
   {
 //---
    hMA = iMA(NULL, 0, MAper, 0, MODE_SMA, PRICE_CLOSE);
-   hOscSlow = iStochastic(NULL, 0, 21, )
-   hCI = iCustom(NULL, 0, "Buyersremorse");
+   hOscSlow = iStochastic(NULL, 0, 21, 4, 10, MODE_SMA, PRICE_CLOSE);
+   hOscFast = iStochastic(NULL, 0, 5, 2, 2, MODE_SMA, PRICE_CLOSE);
+   hAwesome = iAO(NULL, 0);
 //---
    return(INIT_SUCCEEDED);
   }
@@ -37,7 +42,9 @@ int OnInit()
 void OnDeinit(const int reason)
   {
 //---
-   IndicatorRelease(hCI);
+   IndicatorRelease(hAwesome);
+   IndicatorRelease(hOscFast);
+   IndicatorRelease(hOscSlow);
    IndicatorRelease(hMA);
   }
 //+------------------------------------------------------------------+
@@ -53,45 +60,67 @@ void OnTick()
     int i;
     ulong ticket;
     datetime t[];
-    double h[], l[], ma[], atr_h[], atr_l[],
-        lev_h, lev_l, StopLoss,
+    double h[], l[], OscSlow[], OscFast[], Awesome[],
+        lev_h, lev_l, StopLoss, account_balance, lot_size,
         StopLevel = _Point * SymbolInfoInteger(Symbol(), SYMBOL_TRADE_STOPS_LEVEL),
         Spread = NormalizeDouble( SymbolInfoDouble(Symbol(), SYMBOL_ASK) - SymbolInfoDouble(Symbol(), SYMBOL_BID), _Digits);
     
+    
+    account_balance = AccountInfoDouble(ACCOUNT_EQUITY);
+    lot_size = MathFloor(account_balance/LotSafety) / 100;
     request.symbol = Symbol();
-    request.volume = Lots;
+    request.volume = lot_size;
     request.tp = 0;
     request.deviation = 0;
     request.type_filling = ORDER_FILLING_FOK;
     
     TimeCurrent(dt);
-    i=(dt.hour+1)*60;
     
-    if(CopyTime(Symbol(),0,0,i,t)<i || CopyHigh(Symbol(),0,0,i,h)<i || CopyLow(Symbol(),0,0,i,l)<i)
-       {
-          Print("Can't copy timeserieh!");
-          return;
-       }
+    // 1. Check if order is placed.
+    // 2. if yes, 2.1 check if time to close,
+    //            2.2 adjust its StopLoss and TakeProfit
+    // 3. if no,  3.1 check indicator for opening a position,
+    //            3.2 open a position maybe.
     
-    ArraySetAsSeries(t, true);
-    ArraySetAsSeries(h, true);
-    ArraySetAsSeries(l, true);
-    
-    lev_h=h[0];
-    lev_l=l[0];
-    for(i=1; i<ArraySize(t) && MathFloor(t[i]/86400)==MathFloor(t[0]/86400);i++)
-        {
-        if(h[i]>lev_h) lev_h=h[i];
-        if(l[i]<lev_l) lev_l=l[i];
-        }       
-        
-    lev_h += Spread + _Point;
-    lev_l -= _Point;
-    
-    if(CopyBuffer(hMA,0,0,2,ma) < 2 || CopyBuffer(hCI,0,0,1,atr_h) < 1 || CopyBuffer(hCI,1,0,1,atr_l) < 1) {
+    // 0. We will need the indicators either way
+    if(CopyBuffer(hOscSlow,0,0,3,OscSlow) < 3 || CopyBuffer(hOscFast,0,0,3,OscFast) < 1 || CopyBuffer(hAwesome,0,0,3,Awesome) < 3) {
         Print("Can't copy indicator buffeh!");
         return;
     }
+    ArraySetAsSeries(OscSlow, true);
+    ArraySetAsSeries(OscFast, true);
+    ArraySetAsSeries(Awesome, true);
+
+    //1.
+    int pos_total = PositionsTotal();
+    if(pos_total == 1)
+        {
+        // processing orders with "our" symbols only
+        if(Symbol()==PositionGetSymbol(0))
+            {
+            //2.
+            MqlTick last_tick;
+            if(SymbolInfoTick(Symbol(),last_tick)) 
+                { 
+                Print(last_tick.time,": Bid = ",last_tick.bid, 
+                    " Ask = ",last_tick.ask,"  Volume = ",last_tick.volume); 
+                } 
+            else Print("SymbolInfoTick() failed, error = ",GetLastError()); 
+            
+            }       
+        }
+    else if(pos_total == 0)
+        {
+        //3.
+        double latest_slow = OscSlow[1];
+        double latest_fast = OscFast[1];
+        if
+        }
+    else
+        {
+        Print("Error: too many positions!");
+        return;
+        }    
     
     ArraySetAsSeries(ma, true);
     atr_l[0] += Spread;
